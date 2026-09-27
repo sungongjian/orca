@@ -52,10 +52,11 @@ function fail(message) {
  * version under test, and a CI runner has no installed Orca app to fall back on.
  */
 function resolveCli() {
-  const built = join(projectDir, 'out', 'cli', 'index.js')
-  return existsSync(built)
-    ? { command: process.execPath, prefix: [built] }
-    : { command: 'orca', prefix: [] }
+  const built = join(projectDir, 'out', 'cli', 'cli-bin.js')
+  if (!existsSync(built)) {
+    throw new Error('Build the CLI before running the runtime acceptance test.')
+  }
+  return { command: process.execPath, prefix: [built] }
 }
 
 /** The `orca` CLI, driven with an explicit pairing code so it targets this server only. */
@@ -133,6 +134,35 @@ function waitForReady(child) {
   })
 }
 
+async function stopServer(child, lockPath) {
+  const ownerLoss = process.platform === 'win32' && lockPath !== undefined
+  if (child.exitCode !== null || child.signalCode !== null) {
+    if (child.exitCode !== 0) {
+      throw new Error(`server exited unexpectedly: ${child.exitCode ?? child.signalCode}`)
+    }
+    return
+  }
+  await new Promise((resolvePromise, rejectPromise) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      rejectPromise(new Error(`server did not exit within ${SHUTDOWN_TIMEOUT_MS}ms of SIGTERM`))
+    }, SHUTDOWN_TIMEOUT_MS)
+    // Bun inherits these streams; close waits for it after Windows kills only the launcher.
+    child.once('close', (code, signal) => {
+      clearTimeout(timer)
+      if (code === 0 || (ownerLoss && signal === 'SIGTERM')) {
+        resolvePromise()
+      } else {
+        rejectPromise(new Error(`server shutdown failed: ${code ?? signal}`))
+      }
+    })
+    child.kill('SIGTERM')
+  })
+  if (lockPath && existsSync(lockPath)) {
+    throw new Error('Server exited without releasing its profile lock')
+  }
+}
+
 function pairingCodeFrom(payload) {
   const url = payload?.pairing?.url
   if (!url) {
@@ -175,6 +205,7 @@ function resolveLaunch(userDataDir) {
   if (target === 'orcad') {
     return {
       label: `orcad (${ORCAD_ENTRY})`,
+      lockPath: join(userDataDir, 'orcad.lock'),
       command: process.execPath,
       args: [ORCAD_ENTRY, '--port', String(PORT), '--json'],
       env: { ORCA_USER_DATA: userDataDir }
@@ -227,27 +258,46 @@ async function main() {
 
   // Why tracked out here: the worktree lands in the real workspaces root, not the temp
   // profile, so the finally block has to remove it explicitly or every run leaks one.
+  const folderWorkspace = process.argv.includes('--folder')
   let seeded = null
   let pairing = null
 
-  const child = spawn(launch.command, launch.args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, ...launch.env }
-  })
+  const startServer = () =>
+    spawn(launch.command, launch.args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, ...launch.env }
+    })
+  let child = startServer()
 
   try {
     const ready = await waitForReady(child)
     log(`ready: ${ready.advertisedEndpoint}`)
-    const pairingCode = pairingCodeFrom(ready)
+    let pairingCode = pairingCodeFrom(ready)
     pairing = pairingCode
 
     // Why seed instead of using whatever the profile already holds: a hermetic repo makes
     // this runnable on a clean CI box, keeps the assertion deterministic, and exercises
     // repo.add + worktree.create rather than assuming someone else registered a worktree.
-    const repoPath = seedGitRepo()
+    const repoPath = folderWorkspace
+      ? mkdtempSync(join(tmpdir(), 'orca-smoke-folder-'))
+      : seedGitRepo()
     seeded = { repoPath }
-    log(`seeded repo at ${repoPath}`)
-    const repo = orca(pairingCode, ['repo', 'add', '--path', repoPath])?.repo
+    log(`seeded ${folderWorkspace ? 'folder' : 'git repo'} at ${repoPath}`)
+    let repo
+    if (folderWorkspace) {
+      // The public RPC supports folder registration; the repo-add CLI flag does not.
+      const { RuntimeClient } = await import(
+        pathToFileURL(join(projectDir, 'out/cli/runtime/client.js')).href
+      )
+      const client = new RuntimeClient(userDataDir, 60_000, pairingCode, null)
+      repo = (await client.call('repo.add', { path: repoPath, kind: 'folder' })).result.repo
+      if (repo.kind !== 'folder' || existsSync(join(repoPath, '.git'))) {
+        throw new Error('Folder registration unexpectedly created a git workspace')
+      }
+      writeFileSync(join(repoPath, 'keep.txt'), 'User-owned folder contents')
+    } else {
+      repo = orca(pairingCode, ['repo', 'add', '--path', repoPath])?.repo
+    }
     if (!repo?.id) {
       throw new Error('repo.add returned no repo id')
     }
@@ -277,6 +327,17 @@ async function main() {
       throw new Error('worktree.create succeeded but worktree.show cannot resolve it')
     }
     log(`server resolves ${shown.id}`)
+    if (process.argv.includes('--restart')) {
+      await stopServer(child, launch.lockPath)
+      child = startServer()
+      pairingCode = pairingCodeFrom(await waitForReady(child))
+      pairing = pairingCode
+      const restored = orca(pairingCode, ['worktree', 'show', '--worktree', created.id])?.worktree
+      if (restored?.id !== created.id) {
+        throw new Error('Restarted server cannot resolve the persisted worktree')
+      }
+      log('clean restart restored persisted worktree OK')
+    }
     if (process.argv.includes('--browser')) {
       const status = orca(pairingCode, ['status'])
       if (!status?.runtime?.capabilities?.includes('browser.headless.v1')) {
@@ -322,21 +383,28 @@ async function main() {
       log('browser navigate/evaluate/screenshot round trip OK')
     }
 
-    const terminal = orca(pairingCode, ['terminal', 'create', '--worktree', created.id])?.terminal
+    const terminal = orca(pairingCode, [
+      'terminal',
+      'create',
+      '--worktree',
+      created.id,
+      ...(process.platform === 'win32' ? ['--shell', 'powershell.exe'] : [])
+    ])?.terminal
     if (!terminal?.handle) {
       throw new Error('terminal.create returned no handle')
     }
     log(`created ${terminal.handle}`)
 
-    // Why invoke node rather than `echo`: the shell differs per platform, node does not.
-    const nonce = `ORCA_SMOKE_${randomBytes(8).toString('hex')}`
+    // Assemble the nonce inside the process so terminal input echo cannot satisfy the assertion.
+    const suffix = randomBytes(8).toString('hex')
+    const nonce = `ORCA_SMOKE_${suffix}`
     orca(pairingCode, [
       'terminal',
       'send',
       '--terminal',
       terminal.handle,
       '--text',
-      `"${process.execPath}" -e "console.log('${nonce}')"`,
+      `${process.platform === 'win32' ? '& ' : ''}"${process.execPath}" -e "console.log('ORCA_SMOKE_'+'${suffix}')"`,
       '--enter'
     ])
 
@@ -371,8 +439,16 @@ async function main() {
       // Why the parent too: `worktree rm` removes the worktree directory, leaving the
       // empty `<workspaces>/<repo-name>/` container behind. Every run would leak one.
       const worktreePath = seeded.worktreeId.split('::')[1]
-      if (removed.status === 0 && worktreePath) {
-        rmSync(dirname(worktreePath), { recursive: true, force: true })
+      if (removed.status === 0 && worktreePath && !folderWorkspace) {
+        rmSync(dirname(worktreePath), {
+          recursive: true,
+          force: true,
+          maxRetries: 5,
+          retryDelay: 200
+        })
+      }
+      if (folderWorkspace && !existsSync(join(seeded.repoPath, 'keep.txt'))) {
+        fail('Removing the folder workspace deleted user-owned files')
       }
       if (removed.status !== 0) {
         log(
@@ -381,23 +457,14 @@ async function main() {
         )
       }
     }
-    // Why the exitCode guard: a server that died during boot has already exited, and
-    // waiting for a second 'exit' that will never fire reported a bogus shutdown failure
-    // stacked on top of the real error.
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill('SIGTERM')
-      const exited = await Promise.race([
-        new Promise((r) => child.on('exit', () => r(true))),
-        new Promise((r) => setTimeout(() => r(false), SHUTDOWN_TIMEOUT_MS))
-      ])
-      if (!exited) {
-        child.kill('SIGKILL')
-        fail(`server did not exit within ${SHUTDOWN_TIMEOUT_MS}ms of SIGTERM`)
-      }
+    try {
+      await stopServer(child, launch.lockPath)
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error))
     }
-    rmSync(userDataDir, { recursive: true, force: true })
+    rmSync(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
     if (seeded?.repoPath) {
-      rmSync(seeded.repoPath, { recursive: true, force: true })
+      rmSync(seeded.repoPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
     }
   }
 
