@@ -24,7 +24,7 @@ const expensiveJobs = [
   'test',
   'orcad_browser',
   'cross-version-wire',
-  'managed_hook_node18',
+  'managed_hook_bun',
   'package',
   'package_windows'
 ]
@@ -276,7 +276,7 @@ describe('per-job path classification', () => {
         package_windows: true
       })
     }
-    expectClassification(['src/main/orcad/orcad-native-preflight.ts'], {
+    expectClassification(['src/main/orcad/orcad-bun-native-preflight.ts'], {
       package: true,
       package_windows: true
     })
@@ -310,7 +310,7 @@ describe('per-job path classification', () => {
   })
 
   it('leaves it off for changes that cannot reach the page', () => {
-    for (const file of ['docs/reference/x.md', 'src/main/orcad/orcad-native-preflight.ts']) {
+    for (const file of ['docs/reference/x.md', 'src/main/orcad/orcad-bun-native-preflight.ts']) {
       expect(classifyPrJobs([file]).mobile_web_app, file).toBe(false)
     }
   })

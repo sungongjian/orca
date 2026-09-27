@@ -13,6 +13,8 @@ import { bunProfileTestPaths } from './bun-profile-test-paths.mjs'
 const ROOT = resolve(import.meta.dirname, '../..')
 const BUILD_SCRIPTS = [
   'config/scripts/build-orcad-bun.mjs',
+  'config/scripts/run-bundled-runtime-tests.mjs',
+  'config/scripts/runtime-serve-terminal-smoke.mjs',
   'config/scripts/build-orcad.mjs',
   'config/scripts/build-windows-process-tree-relay-addon.mjs',
   'config/scripts/run-bun-profile-tests.mjs',
@@ -23,6 +25,8 @@ const BUILD_SCRIPTS = [
 ]
 const ALWAYS_FILES = new Set([
   'package.json',
+  'resources/darwin/bin/orca',
+  'resources/linux/bin/orca-ide',
   'pnpm-lock.yaml',
   'pnpm-workspace.yaml',
   '.npmrc',
@@ -40,6 +44,17 @@ const ALWAYS_PREFIXES = [
   'src/main/orcad/',
   'src/main/daemon/pty-subprocess/',
   'src/main/providers/',
+  'src/cli/',
+  'src/main/cli/',
+  'src/main/wsl/',
+  'src/main/agent-hooks/wsl-',
+  'src/main/ai-vault/opencode-wsl-runtime-preparation',
+  'src/shared/bundled-cli-runtime-path',
+  'config/scripts/build-cli-',
+  'src/main/native-chat/wsl-transcript',
+  'src/main/browser/wsl-browser-network',
+  'src/relay/',
+  'resources/licenses/bun/',
   'config/patches/',
   'config/tsconfig',
   'native/',

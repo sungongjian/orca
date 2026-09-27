@@ -82,7 +82,17 @@ it.each([
   'native/windows-registry/src/addon.cc',
   '.github/actions/install-node-dependencies/action.yml',
   '.github/workflows/bun-profile-tests.yml',
-  'src/main/persistence/profile-state/new-worker.ts'
+  'src/main/persistence/profile-state/new-worker.ts',
+  'src/main/native-chat/wsl-transcript-bun-fixture.ts',
+  'src/main/cli/windows-cli-bun-fixture.ts',
+  'src/main/browser/wsl-browser-network-bun.integration.test.ts',
+  'src/cli/cli-bin.ts',
+  'resources/darwin/bin/orca',
+  'resources/linux/bin/orca-ide',
+  'config/scripts/build-cli-bin.mjs',
+  'config/scripts/build-cli-runtime.mjs',
+  'src/shared/bundled-cli-runtime-path.ts',
+  'src/main/wsl/wsl-bun-runtime.ts'
 ])('always selects build, native and dynamically opened inputs: %s', async (file) => {
   expect((await classifyBunProfileChanges([file], async () => new Set())).shouldRun).toBe(true)
 })
@@ -111,6 +121,7 @@ describe('the actual Bun build and profile-test dependency graph', () => {
     'config/scripts/zip-extractor-command.mjs',
     'config/scripts/windows-process-tree-gyp-rebuild.mjs',
     'config/scripts/profile-state-worker-smoke.mjs',
+    'config/scripts/runtime-serve-terminal-smoke.mjs',
     'config/scripts/vitest-host-ports-setup.ts',
     'tests/e2e/daemon-running-work-probe.unit.test.ts'
   ])('retains the full matrix for a real runtime, worker or test input: %s', async (file) => {
